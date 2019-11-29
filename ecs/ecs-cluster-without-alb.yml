@@ -1,0 +1,242 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  KeyName:
+    Type: String
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the ECS instances
+    Default: at-gs1
+  DesiredCapacity:
+    Type: Number
+    Default: '2'
+    Description: Number of instances to launch in your ECS cluster.
+  MaxSize:
+    Type: Number
+    Default: '3'
+    Description: Maximum number of instances that can be launched in your ECS cluster.
+  DesiredTaskCount:
+    Type: Number
+    Description: Number of tasks you want the ECS service to run
+    Default: '1'
+  MaximumPercent:
+    Type: Number
+    Description: Number of tasks you want the ECS service to run
+    Default: '100'
+  MinimumHealthyPercent:
+    Type: Number
+    Description: Number of tasks you want the ECS service to run
+    Default: '0'
+  HostPort:
+    Type: Number
+    Default: '8080'
+    Description: Port number on host that maps to port inside the container.
+  ContainerPort:
+    Type: Number
+    Default: '8080'
+    Description: Port number app is run inside the container.
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.medium
+    AllowedValues: [t2.micro, t2.small, t2.medium, t2.large]
+    ConstraintDescription: You must select a valid instance type.
+  AccountRole:
+    Type: String
+    Default: CUS-ENV
+  InstanceRole:
+    Type: String
+    Default: ROLE-INSTANCETYPE
+  BackendUrl:
+    Type: String
+    Default: author.autotrader-preprod.customer0.incubationzone.be
+  EcsImageUri:
+    Type: String
+    Description: "URI to the Docker image to use for app (e.g. in ECR or DockerHub)"
+    Default: 774506115652.dkr.ecr.us-east-1.amazonaws.com/epcc1-storefront
+  EcsImageVersion:
+    Type: String
+    Description: Version of the Docker image to use for app
+    Default: latest
+  VpcAlbStackName:
+    Description: The VPC and ABL stack that is created before this stack and represents a dependency
+    Type: String
+    Default: ECS-VPC-DEV-VPCID
+
+Mappings:
+  AWSRegionToAMI:
+  # amzn-ami-2017.09.l-amazon-ecs-optimized
+  # https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-optimized_AMI.html
+    us-east-1:
+      AMIID: ami-097e3d1cdb541f43e
+
+Resources:
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+  EcsSecurityGroupHTTPinbound:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: {'Fn::ImportValue': !Sub '${VpcAlbStackName}-EcsSecurityGroup'}
+      IpProtocol: tcp
+      FromPort: '80'
+      ToPort: '80'
+      CidrIp: 0.0.0.0/0
+  EcsSecurityGroupHTTP8080inbound:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: {'Fn::ImportValue': !Sub '${VpcAlbStackName}-EcsSecurityGroup'}
+      IpProtocol: tcp
+      FromPort: '8080'
+      ToPort: '8080'
+      CidrIp: 0.0.0.0/0
+  EcsSecurityGroupHTTPSinbound:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: {'Fn::ImportValue': !Sub '${VpcAlbStackName}-EcsSecurityGroup'}
+      IpProtocol: tcp
+      FromPort: '443'
+      ToPort: '443'
+      CidrIp: 0.0.0.0/0
+  EcsSecurityGroupSSHinbound:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: {'Fn::ImportValue': !Sub '${VpcAlbStackName}-EcsSecurityGroup'}
+      IpProtocol: tcp
+      FromPort: '22'
+      ToPort: '22'
+      CidrIp: 0.0.0.0/0
+  EcsSecurityGroupALBports:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: {'Fn::ImportValue': !Sub '${VpcAlbStackName}-EcsSecurityGroup'}
+      IpProtocol: tcp
+      FromPort: '31000'
+      ToPort: '61000'
+      SourceSecurityGroupId: {'Fn::ImportValue': !Sub '${VpcAlbStackName}-EcsSecurityGroup'}
+  CloudwatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-', [ECSLogGroup, !Ref 'AWS::StackName']]
+      RetentionInDays: 30
+  taskdefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-taskdef'
+      ContainerDefinitions:
+      - Name: !Sub '${AWS::StackName}-task'
+        Cpu: '1024'
+        Essential: 'true'
+        Image: !Sub '${EcsImageUri}:${EcsImageVersion}'
+        Memory: '2048'
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref 'CloudwatchLogsGroup'
+            awslogs-region: !Ref 'AWS::Region'
+            awslogs-stream-prefix: !Sub '${AWS::StackName}-logs'
+        PortMappings:
+        - ContainerPort: 8080
+  ECSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - {'Fn::ImportValue': !Sub '${VpcAlbStackName}-PublicSubnet1'}
+      - {'Fn::ImportValue': !Sub '${VpcAlbStackName}-PublicSubnet2'}
+      LaunchConfigurationName: !Ref 'ContainerInstances'
+      MinSize: '1'
+      MaxSize: !Ref 'MaxSize'
+      DesiredCapacity: !Ref 'DesiredCapacity'
+      Tags:
+        - Key: Name
+          Value: autotarder-dev-www-head-TEST
+          PropagateAtLaunch: 'true'
+        - Key: AccountRole
+          Value: !Ref 'AccountRole'
+          PropagateAtLaunch: 'true'
+        - Key: InstanceRole
+          Value: !Ref 'InstanceRole'
+          PropagateAtLaunch: 'true'
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: 'true'
+  ContainerInstances:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !FindInMap [AWSRegionToAMI, !Ref 'AWS::Region', AMIID]
+      SecurityGroups:
+      - {'Fn::ImportValue': !Sub '${VpcAlbStackName}-EcsSecurityGroup'}
+      InstanceType: !Ref 'InstanceType'
+      IamInstanceProfile: !Ref 'EC2InstanceProfile'
+      KeyName: !Ref 'KeyName'
+      UserData: !Base64
+        Fn::Sub: |
+          #!/bin/bash -x
+          echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
+          yum install -y aws-cfn-bootstrap
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ECSAutoScalingGroup --region ${AWS::Region}
+  service:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref 'ECSCluster'
+      DeploymentConfiguration:
+        MaximumPercent: !Ref 'MaximumPercent'
+        MinimumHealthyPercent: !Ref 'MinimumHealthyPercent'
+      DesiredCount: !Ref 'DesiredTaskCount'
+      LoadBalancers:
+      - ContainerName: !Sub '${AWS::StackName}-task'
+        ContainerPort: !Ref 'ContainerPort'
+        TargetGroupArn: {'Fn::ImportValue': !Sub '${VpcAlbStackName}-EcsTargetGroup'}
+      Role: {'Fn::ImportValue': !Sub '${VpcAlbStackName}-ECSServiceRole'}
+      TaskDefinition: !Ref 'taskdefinition'
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ec2.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      ManagedPolicyArns:
+          - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: ['ecs:CreateCluster', 'ecs:DeregisterContainerInstance', 'ecs:DiscoverPollEndpoint',
+              'ecs:Poll', 'ecs:RegisterContainerInstance', 'ecs:StartTelemetrySession',
+              'ecs:Submit*', 'logs:CreateLogStream', 'logs:PutLogEvents', 's3:*']
+            Resource: '*'
+  AutoscalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [application-autoscaling.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: service-autoscaling
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: ['application-autoscaling:*', 'cloudwatch:DescribeAlarms', 'cloudwatch:PutMetricAlarm',
+              'ecs:DescribeServices', 'ecs:UpdateService', 's3:*']
+            Resource: '*'
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles: [!Ref 'EC2Role']
+Outputs:
+  ecsservice:
+    Value: !Ref 'service'
+  ecscluster:
+    Value: !Ref 'ECSCluster'
+  taskdef:
+    Value: !Ref 'taskdefinition'
